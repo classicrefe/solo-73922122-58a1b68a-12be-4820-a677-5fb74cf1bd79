@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>铝厂再生料申报审核</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header>
+  <h1>铝厂余料转炉 · 再生料申报审核台</h1>
+  <p>称重账（整数公斤）· 每炉总进料＝总出料 · 每批至多一张有效签单 · 提交失败一律保留原账、签单与核定结果</p>
+</header>
+<main>
+
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% for category, msg in messages %}
+    <div class="flash {{ category }}">{{ msg }}</div>
+  {% endfor %}
+{% endwith %}
+
+<!-- 1. 账套上传 -->
+<section class="card">
+  <h2>① 上传称重账 CSV
+    <span class="tag">列：record_type, furnace, ref, primary_kg, recycled_kg, weight_kg</span>
+  </h2>
+  <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data"
+        class="inline" style="flex-wrap:wrap">
+    <input type="file" name="csv_file" accept=".csv,text/csv" required>
+    <label class="check"><input type="checkbox" name="replace" value="1"> 替换当前账套（换账）</label>
+    <button type="submit">上传并核定</button>
+  </form>
+  {% if ledgers %}
+  <p class="small muted" style="margin-bottom:0">历史账套：
+    {% for l in ledgers %}
+      <a class="btn {{ 'ghost' if l.id != view_ledger_id else '' }}" style="padding:2px 8px"
+         href="{{ url_for('index', ledger=l.id) }}">#{{ l.id }} {{ l.filename }}
+        {% if l.is_current %}（当前）{% endif %}</a>
+    {% endfor %}
+  </p>
+  {% endif %}
+</section>
+
+{% if not ledger_row %}
+  <section class="card"><p class="muted">尚未导入账套。请先上传 CSV（可使用仓库 <span class="code">data/sample_ledger.csv</span> 示例文件）。</p></section>
+{% else %}
+
+<!-- 2. 核定结论 -->
+<section class="card">
+  <h2>② 核定结论
+    <span class="tag">账套 #{{ ledger_row.id }} · {{ ledger_row.filename }} · 导入于 {{ ledger_row.imported_at }}</span>
+  </h2>
+  {% if not sol_row %}
+    <div class="solution-box warn">尚未生成核定结果，请点击“重新核定”。</div>
+  {% elif sol_row.ok %}
+    <div class="solution-box">
+      <strong>存在满足全部有效签单的再生料分配方案（整数公斤）。</strong>
+      下表“核定再生料”列即一套可行重量：每炉再生料进出相等，每笔出货/转料均不超过实称重量，
+      且各有效签单的最低再生料重量全部满足。
+    </div>
+  {% else %}
+    <div class="solution-box fail">
+      <strong>当前账套与有效签单无可行解。</strong><br>
+      原因：{{ sol_row.reason }}<br>
+      <span class="small">原账、签单与上一版核定结果均未被覆盖；调整签单或更换账套后可重新核定。</span>
+    </div>
+  {% endif %}
+  <form method="post" action="{{ url_for('recheck') }}" style="margin-top:12px">
+    <button type="submit">重新核定（已签重量照旧，重算出货/回炉再生料分配）</button>
+  </form>
+</section>
+
+<!-- 3. 炉次账 -->
+<section class="card">
+  <h2>③ 炉次账与物料平衡</h2>
+  <div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>炉号</th>
+        <th class="num">外购原生料</th>
+        <th class="num">外购再生料</th>
+        <th class="num">转入余料（实称）</th>
+        <th class="num">出货批合计（实称）</th>
+        <th class="num">转出余料（实称）</th>
+        <th class="num">总进料</th>
+        <th class="num">总出料</th>
+        <th>平衡</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for f in furnaces %}
+      {% set b = balance[f.code] %}
+      <tr>
+        <td class="code">{{ f.code }}</td>
+        <td class="num">{{ f.primary_kg }}</td>
+        <td class="num">{{ f.recycled_kg }}</td>
+        <td class="num">{{ b.t_in }}</td>
+        <td class="num">{{ b.ship }}</td>
+        <td class="num">{{ b.t_out }}</td>
+        <td class="num">{{ b.in_total }}</td>
+        <td class="num">{{ b.out_total }}</td>
+        <td>
+          {% if b.in_total == b.out_total %}
+            <span class="balance-good">相等 ✓</span>
+          {% else %}
+            <span class="balance-bad">不等 ✗</span>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- 4. 出货批 + 核定 + 签发 -->
+<section class="card">
+  <h2>④ 出货批：实称重量、签单与核定再生料重量</h2>
+  <div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>出货批号</th>
+        <th>归属炉</th>
+        <th class="num">实称重量(kg)</th>
+        <th class="num">有效签单下限(kg)</th>
+        <th class="num">核定再生料(kg)</th>
+        <th>签单状态 / 操作</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for b in batches %}
+      {% set c = cert_map.get(b.code) %}
+      {% set v = sol_batch_map.get(b.code) %}
+      <tr>
+        <td class="code">{{ b.code }}</td>
+        <td class="code">{{ b.furnace_code }}</td>
+        <td class="num">{{ b.weight_kg }}</td>
+        <td class="num">{% if c %}{{ c.min_recycled_kg }}{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td class="num">
+          {% if v is not none %}
+            <strong>{{ v }}</strong>
+            {% if c and v < c.min_recycled_kg %}<span class="balance-bad">低于签单!</span>{% endif %}
+          {% else %}<span class="muted">待核定</span>{% endif %}
+        </td>
+        <td>
+          {% if c %}
+            <span class="ok-pill green">有效签单 #{{ c.id }}</span>
+            <form class="inline" method="post" action="{{ url_for('revoke_cert') }}"
+                  onsubmit="return confirm('确认撤销批 {{ b.code }} 的有效签单？');">
+              <input type="hidden" name="cert_id" value="{{ c.id }}">
+              <button class="danger" type="submit">撤销签单</button>
+            </form>
+          {% else %}
+            <form class="inline" method="post" action="{{ url_for('sign_cert') }}">
+              <input type="hidden" name="batch_code" value="{{ b.code }}">
+              <input type="number" name="min_recycled_kg" min="1" max="{{ b.weight_kg }}"
+                     step="1" placeholder="最低kg" required>
+              <button type="submit">签发申报</button>
+            </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="small muted">规则：每批最多一张有效签单；下限须为不超过实称重量的正整数；签发即触发整体重核，无解则自动回滚。</p>
+</section>
+
+<!-- 5. 余料转料 -->
+<section class="card">
+  <h2>⑤ 余料转炉记录与核定回炉再生料重量</h2>
+  <div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>记录#</th>
+        <th>源炉</th>
+        <th>目标炉</th>
+        <th class="num">转料实称(kg)</th>
+        <th class="num">核定再生料(kg)</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for t in transfers %}
+      {% set v = sol_transfer_map.get(t.id) %}
+      <tr>
+        <td class="num muted">{{ t.id }}</td>
+        <td class="code">{{ t.src_furnace }}</td>
+        <td class="code">→ {{ t.dst_furnace }}</td>
+        <td class="num">{{ t.weight_kg }}</td>
+        <td class="num">{% if v is not none %}<strong>{{ v }}</strong>{% else %}<span class="muted">待核定</span>{% endif %}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5" class="muted">本账套无余料转料记录。</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- 6. 签单台账 -->
+<section class="card">
+  <h2>⑥ 签单台账（含已撤销历史）</h2>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>签单#</th><th>出货批号</th><th class="num">最低再生料(kg)</th><th>状态</th><th>签发时间</th><th>撤销时间</th></tr></thead>
+    <tbody>
+    {% for c in certs %}
+      <tr>
+        <td class="num">{{ c.id }}</td>
+        <td class="code">{{ c.batch_code }}</td>
+        <td class="num">{{ c.min_recycled_kg }}</td>
+        <td>
+          {% if c.active %}
+            <span class="ok-pill green">有效</span>
+          {% else %}
+            <span class="ok-pill gray">已撤销</span>
+          {% endif %}
+        </td>
+        <td class="small">{{ c.signed_at }}</td>
+        <td class="small">{{ c.revoked_at or '—' }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="6" class="muted">暂无任何签单。</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+{% endif %}
+
+<!-- 7. 审计日志 -->
+<section class="card">
+  <h2>⑦ 最近操作日志</h2>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>时间(UTC)</th><th>动作</th><th>明细</th><th>结果</th></tr></thead>
+    <tbody>
+    {% for l in logs %}
+      <tr>
+        <td class="small">{{ l.ts }}</td>
+        <td class="code">{{ l.action }}</td>
+        <td class="log-detail">{{ l.detail }}</td>
+        <td>{% if l.success %}<span class="log-ok">成功</span>{% else %}<span class="log-fail">失败</span>{% endif %}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="4" class="muted">暂无日志。</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+
+</main>
+</body>
+</html>

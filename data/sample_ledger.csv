@@ -1,0 +1,11 @@
+record_type,furnace,ref,primary_kg,recycled_kg,weight_kg
+furnace,F1,,0,370,
+furnace,F2,,50,50,
+furnace,F3,,100,50,
+batch,F1,B1,,,300
+batch,F1,B2,,,50
+batch,F2,B3,,,90
+batch,F3,B4,,,140
+batch,F3,B5,,,40
+transfer,F1,F2,,,20
+transfer,F2,F3,,,30
